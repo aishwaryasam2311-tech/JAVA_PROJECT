@@ -1,0 +1,638 @@
+package supermarket;
+  import javax.swing.*;
+import javax.swing.table.DefaultTableModel;
+import java.awt.*;
+import java.io.FileWriter;
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+import java.sql.*;
+import java.time.LocalDate;
+import java.util.Base64;
+public class SuperMarketBillingSystem extends JFrame {
+    // ---------------- DATABASE SETTINGS ----------------
+    private static final String DB_URL =
+            "jdbc:mysql://localhost:3306/supermarket_db?createDatabaseIfNotExist=true&useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Kolkata";
+    private static final String DB_USER = "root";
+    private static final String DB_PASSWORD = "YOUR_DB_PASSWORD";
+
+    private static Connection connect() throws SQLException {
+        return DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD);
+    }
+
+    private static void initializeDatabase() throws Exception {
+        Class.forName("com.mysql.cj.jdbc.Driver");
+        try (Connection c = connect(); Statement s = c.createStatement()) {
+            s.executeUpdate("CREATE TABLE IF NOT EXISTS users (" +
+                    "user_id INT AUTO_INCREMENT PRIMARY KEY, username VARCHAR(50) UNIQUE NOT NULL," +
+                    "password VARCHAR(255) NOT NULL, role VARCHAR(20) NOT 
+NULL)");
+            s.executeUpdate("CREATE TABLE IF NOT EXISTS products (" +
+                    "product_id INT AUTO_INCREMENT PRIMARY KEY, product_name VARCHAR(100) NOT NULL," +
+                    "category VARCHAR(60), price DECIMAL(10,2) NOT NULL," +
+                    "stock_quantity INT NOT NULL DEFAULT 0, barcode VARCHAR(60))");
+            s.executeUpdate("CREATE TABLE IF NOT EXISTS customers (" +
+                    "customer_id INT AUTO_INCREMENT PRIMARY KEY, customer_name VARCHAR(100) NOT NULL," +
+                    "phone VARCHAR(20), email VARCHAR(100), loyalty_points INT DEFAULT 0," +
+                    "membership_level VARCHAR(20) DEFAULT 'REGULAR')");
+            s.executeUpdate("CREATE TABLE IF NOT EXISTS sales_bills (" +
+                    "bill_id INT AUTO_INCREMENT PRIMARY KEY, bill_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP," +
+                    "customer_id INT NULL, subtotal DECIMAL(12,2) NOT NULL," +
+                    "discount DECIMAL(10,2) DEFAULT 0, tax DECIMAL(10,2) DEFAULT 0," +
+                    "grand_total DECIMAL(12,2) NOT NULL," +
+                    "FOREIGN KEY (customer_id) REFERENCES customers(customer_id) ON DELETE SET NULL)");
+            
+
+
+s.executeUpdate("CREATE TABLE IF NOT EXISTS sales_items (" +
+                    "sales_item_id INT AUTO_INCREMENT PRIMARY KEY, bill_id INT NOT NULL," +
+                    "product_id INT NOT NULL, quantity INT NOT NULL, unit_price DECIMAL(10,2) NOT NULL," +
+                    "total_price DECIMAL(12,2) NOT NULL," +
+                    "FOREIGN KEY (bill_id) REFERENCES sales_bills(bill_id) ON DELETE CASCADE," +
+                    "FOREIGN KEY (product_id) REFERENCES products(product_id))");
+        }
+try (Connection c = connect();
+       
+   Statement s = c.createStatement();
+             ResultSet r = s.executeQuery("SELECT COUNT(*) FROM users")) {
+            if (r.next() && r.getInt(1) == 0) {
+                try (PreparedStatement p = c.prepareStatement(
+                        "INSERT INTO users(username,password,role) VALUES(?,?,?)")) {
+                    p.setString(1, "admin");
+                    p.setString(2, PasswordUtil.hash("admin123"));
+                    p.setString(3, "ADMIN");
+                    p.executeUpdate();
+                }
+            }
+        }
+    }
+private static class PasswordUtil {
+        private static final int ITERATIONS = 120000
+private static String hash(String password) throws Exception {
+            byte[] salt = new byte[16];
+            new SecureRandom().nextBytes(salt);
+            byte[] result = derive(password, salt, ITERATIONS);
+            return "PBKDF2$" + ITERATIONS + "$" +
+                    Base64.getEncoder().encodeToString(salt) + "$" +
+                    Base64.getEncoder().encodeToString(result);
+        }
+
+        private static byte[] derive(String password, byte[] salt, int iterations) throws Exception {
+            javax.crypto.spec.PBEKeySpec spec =
+                    new javax.crypto.spec.PBEKeySpec(password.toCharArray(), salt, iterations, 256);
+            try {
+                return javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+                        .generateSecret(spec).getEncoded();
+private static boolean verify(String password, String stored) throws Exception {
+            if (stored == null || !stored.startsWith("PBKDF2$")) return password.equals(stored);
+            String[] parts = stored.split("\\$");
+            if (parts.length != 4) return false;
+            byte[] salt = Base64.getDecoder().decode(parts[2]);
+            byte[] expected = Base64.getDecoder().decode(parts[3]);
+            byte[] actual = derive(password, salt, Integer.parseInt(parts[1]));
+            return MessageDigest.isEqual(expected, actual);
+        }
+    }
+ // ---------------- COMMON UI HELPERS ----------------
+    private static DefaultTableModel model(String... columns) {
+        return new DefaultTableModel(columns, 0) {
+            @Override public boolean isCellEditable(int row, int column) { return false; }
+        };
+    }
+private static JTextField field(int columns) { return new JTextField(columns); }
+
+    private static JPanel formPanel(String[] labels, JTextField[] fields) {
+        JPanel p = new JPanel(new GridLayout(labels.length, 2, 8, 8));
+        for (int i = 0; i < labels.length; i++) {
+            p.add(new JLabel(labels[i]));
+            p.add(fields[i]);
+        }
+        return p;
+    }
+
+    private static void error(Component parent, Exception e) {
+        JOptionPane.showMessageDialog(parent,e.getMessage(),"Error", JOptionPane.ERROR_MESSAGE);
+    }
+
+private static int selectedId(JTable table) {
+        int row = table.getSelectedRow();
+        if (row < 0) return -1;
+        return Integer.parseInt(table.getValueAt(row, 0).toString());
+    }
+
+    
+private static void addRow(DefaultTableModel m, ResultSet r, int count) throws SQLException {
+        Object[] row = new Object[count];
+        for (int i = 0; i < count; i++) row[i] = r.getObject(i + 1);
+        m.addRow(row);
+    }
+
+    // ---------------- LOGIN ----------------
+    private static class LoginDialog extends JDialog {
+        private final JTextField username = field(18);
+        private final JPasswordField password = new JPasswordField(18);
+        private String loggedInUser;
+        private String loggedInRole;
+LoginDialog() {
+            setTitle("Super Market Billing System - Login");
+            setModal(true);
+            setDefaultCloseOperation(DISPOSE_ON_CLOSE);
+            JPanel p = new JPanel(new GridLayout(3, 2, 10, 10));
+            p.setBorder(BorderFactory.createEmptyBorder(20, 20, 10, 20));
+            p.add(new JLabel("Username")); p.add(username);
+            p.add(new JLabel("Password")); p.add(password);
+            JButton login = new JButton("Login");
+            JButton exit = new JButton("Exit");
+            p.add(login); p.add(exit);
+            login.addActionListener(e -> authenticate());
+            password.addActionListener(e -> authenticate());
+            exit.addActionListener(e -> dispose());
+pack();
+            setLocationRelativeTo(null);
+        }
+        private void authenticate() {
+            String u = username.getText().trim();
+            String pw = new String(password.getPassword());
+            if (u.isEmpty() || pw.isEmpty()) {
+                JOptionPane.showMessageDialog(this, "Enter username and password.");
+                return;
+            }
+            try (Connection c = connect();
+                 PreparedStatement p = c.prepareStatement(
+                         "SELECT user_id,password,role FROM users WHERE  username=?")) {
+                p.setString(1, u);
+                try (ResultSet r = p.executeQuery()) {
+                    if (!r.next() || !PasswordUtil.verify(pw, r.getString("password"))) {
+                        JOptionPane.showMessageDialog(this, "Invalid username or          password.");
+                        return;
+                    }
+                    loggedInUser = u;
+                    loggedInRole = r.getString("role");
+                    // Upgrade a legacy plain-text password after successful login.
+                    if (!r.getString("password").startsWith("PBKDF2$")) {
+                        try (PreparedStatement up = c.prepareStatement(
+                                "UPDATE users SET password=? WHERE user_id=?")) 
+ up.setString(1, PasswordUtil.hash(pw));
+                            up.setInt(2, r.getInt("user_id"));
+                            up.executeUpdate();
+                        }
+                    }
+                    dispose();
+                }
+
+ } catch (Exception ex) { error(this, ex); }
+        }
+    }
+// ---------------- MAIN DASHBOARD ----------------
+    private final String currentUser;
+    private final String role;
+    private SuperMarketBillingSystem(String user, String userRole) {
+        currentUser = user;
+        role = userRole;
+        setTitle("Super Market Billing System");
+        setDefaultCloseOperation(EXIT_ON_CLOSE);
+        setSize(1050, 680);
+        setLocationRelativeTo(null);
+     JLabel heading = new JLabel("SUPER MARKET BILLING SYSTEM",        SwingConstants.CENTER);
+        heading.setFont(new Font("Arial", Font.BOLD, 22));
+        JLabel welcome = new JLabel("Welcome, " + currentUser + " (" + role + ")", SwingConstants.CENTER);
+  JTabbedPane tabs = new JTabbedPane();
+        if ("ADMIN".equalsIgnoreCase(role)) tabs.addTab("User Management", new UserPanel());
+tabs.addTab("Product Inventory", new ProductPanel());
+        tabs.addTab("Customer Loyalty", new CustomerPanel());
+        tabs.addTab("Billing & Sales", new BillingPanel());
+        tabs.addTab("Bill History", new HistoryPanel());
+        if ("ADMIN".equalsIgnoreCase(role)) tabs.addTab("Reports & Analytics", new ReportsPanel());
+        JButton logout = new JButton("Logout");
+        logout.addActionListener(e -> {
+            dispose();
+            SwingUtilities.invokeLater(() -> showLogin());
+  });
+// Upgrade a legacy plain-text password after successful login.
+                    if (!r.getString("password").startsWith("PBKDF2$")) {
+                        try (PreparedStatement up = c.prepareStatement(
+                                "UPDATE users SET password=? WHERE user_id=?")) {
+                            up.setString(1, PasswordUtil.hash(pw));
+                            up.setInt(2, r.getInt("user_id"));
+                            up.executeUpdate();
+                        }
+                    }
+                    dispose();
+                }
+            } catch (Exception ex) { error(this, ex); }
+        }
+    }
+
+    // ---------------- MAIN DASHBOARD ----------------
+    private final String currentUser;
+  private final String role;
+
+    private SuperMarketBillingSystem(String user, String userRole) {
+        currentUser = user;
+        role = userRole;
+        setTitle("Super Market Billing System");
+        setDefaultCloseOperation(EXIT_ON_CLOSE);
+        setSize(1050, 680);
+        setLocationRelativeTo(null);
+
+   JLabel heading = new JLabel("SUPER MARKET BILLING SYSTEM", SwingConstants.CENTER);
+
+heading.setFont(new Font("Arial", Font.BOLD, 22));
+        JLabel welcome = new JLabel("Welcome, " + currentUser + " (" + role + ")", SwingConstants.CENTER);
+
+        JTabbedPane tabs = new JTabbedPane();
+        if ("ADMIN".equalsIgnoreCase(role)) tabs.addTab("User Management", new 
+
+UserPanel());
+        tabs.addTab("Product Inventory", new ProductPanel());
+        tabs.addTab("Customer Loyalty", new CustomerPanel());
+        tabs.addTab("Billing & Sales", new BillingPanel());
+        tabs.addTab("Bill History", new HistoryPanel());
+        if ("ADMIN".equalsIgnoreCase(role)) tabs.addTab("Reports & Analytics", new ReportsPanel());
+
+        JButton logout = new JButton("Logout");
+        logout.addActionListener(e -> {
+    dispose();
+            SwingUtilities.invokeLater(() -> showLogin());
+        });
+
+        JPanel top = new JPanel(new BorderLayout());
+        top.add(heading, BorderLayout.CENTER);
+        top.add(welcome, BorderLayout.SOUTH);
+        add(top, BorderLayout.NORTH);
+        add(tabs, BorderLayout.CENTER);
+        JPanel bottom = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        bottom.add(logout);
+        add(bottom, BorderLayout.SOUTH);
+
+    }
+// ---------------- USER SYSTEM MANAGEMENT ----------------
+    private static class UserPanel extends JPanel {
+        private final JTextField id = field(5), username = field(14), password = field(14);
+        private final JComboBox<String> role = new JComboBox<>(new String[]{"ADMIN", "CASHIER"});
+        private final DefaultTableModel data = model("User ID", "Username", "Role");
+        private final JTable table = new JTable(data);
+
+        UserPanel() {
+            setLayout(new BorderLayout(8, 8));
+            id.setEditable(false);
+            JPanel f = new JPanel(new GridLayout(2, 4, 8, 8));
+            f.add(new JLabel("User ID")); f.add(id);
+            f.add(new JLabel("Username")); f.add(username);
+f.add(new JLabel("Password")); f.add(password);
+            f.add(new JLabel("Role")); f.add(role);
+            JPanel buttons = new JPanel();
+            JButton add = new JButton("Add"), update = new JButton("Update"),
+                    delete = new JButton("Delete"), clear = new JButton("Clear"), refresh = new JButton("Refresh");
+            buttons.add(add); buttons.add(update); buttons.add(delete); buttons.add(clear); buttons.add(refresh);
+            add(f, BorderLayout.NORTH); add(new JScrollPane(table), BorderLayout.CENTER); add(buttons, BorderLayout.SOUTH);
+            add.addActionListener(e -> save(false));
+            update.addActionListener(e -> save(true));
+            delete.addActionListener(e -> delete());
+            clear.addActionListener(e -> clear());
+            refresh.addActionListener(e -> load());
+            table.getSelectionModel().addListSelectionListener(e -> {
+   if (!e.getValueIsAdjusting() && table.getSelectedRow() >= 0) {
+                    int r = table.getSelectedRow();
+                    id.setText(data.getValueAt(r, 0).toString());
+      username.setText(data.getValueAt(r, 1).toString());
+                    role.setSelectedItem(data.getValueAt(r, 2).toString());
+                    password.setText("");
+                }
+            });
+            load();
+        }
+
+        private void load() {
+            data.setRowCount(0);
+try (Connection c = connect(); PreparedStatement p =
+                    c.prepareStatement("SELECT user_id,username,role FROM users ORDER 
+
+BY user_id");
+                 ResultSet r = p.executeQuery()) {
+                while (r.next()) addRow(data, r, 3);
+            } catch (Exception e) { error(this, e); }
+        }
+
+        private void save(boolean update) {
+            if (username.getText().trim().isEmpty() || (!update && password.getText().isEmpty())) {
+                JOptionPane.showMessageDialog(this, "Enter username and password."); return;
+            }
+String sql = update
+                    ? "UPDATE users SET username=?,role=? " + (password.getText().isEmpty() ? "" : ",password=?") + " WHERE user_id=?"
+                    : "INSERT INTO users(username,password,role) VALUES(?,?,?)";
+            try (Connection c = connect(); PreparedStatement p = c.prepareStatement(sql)) {
+                int i = 1;
+                if (update) {
+                    p.setString(i++, username.getText().trim());
+     p.setString(i++, role.getSelectedItem().toString());
+                    if(!password.getText().isEmpty())p.setString(i++, PasswordUtil.hash(password.getText()));
+                    p.setInt(i, Integer.parseInt(id.getText()));
+                } else {
+ p.setString(i++, username.getText().trim());
+                    p.setString(i++, PasswordUtil.hash(password.getText()));
+                    p.setString(i, role.getSelectedItem().toString());
+                }
+                p.executeUpdate(); clear(); load();
+                JOptionPane.showMessageDialog(this, "User saved.");
+            } catch (Exception e) { error(this, e); }
+        }
+  private void delete() {
+            if (id.getText().isEmpty()) return;
+            if (JOptionPane.showConfirmDialog(this, "Delete selected user?", "Confirm",
+                    JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION) return;
+            try (Connection c = connect(); PreparedStatement p =
+                    c.prepareStatement("DELETE FROM users WHERE user_id=?")) {
+                p.setInt(1, Integer.parseInt(id.getText())); p.executeUpdate(); clear(); load();
+            } catch (Exception e) { error(this, e); }
+        }
+        private void clear() { id.setText(""); username.setText(""); password.setText(""); role.setSelectedIndex(0); table.clearSelection(); }
+    }
+// ---------------- PRODUCT INVENTORY MANAGEMENT ----------------
+    private static class ProductPanel extends JPanel {
+        private final JTextField id = field(5), name = field(14), category = field(12),
+   price = field(8), stock = field(6), barcode = field(12), search = field(12);
+        private final DefaultTableModel data = model("Product ID", "Product Name", "Category", "Price", "Stock", "Barcode");
+        private final JTable table = new JTable(data);
+
+        ProductPanel() {
+            setLayout(new BorderLayout(8, 8)); id.setEditable(false);
+            JPanel f = new JPanel(new GridLayout(3, 4, 8, 8));
+            f.add(new JLabel("Product ID")); f.add(id); f.add(new JLabel("Product Name")); f.add(name);
+            f.add(new JLabel("Category")); f.add(category); f.add(new JLabel("Price")); f.add(price);
+            f.add(new JLabel("Stock Quantity"));f.add(stock);f.add(new JLabel("Barcode")); f.add(barcode);
+            JPanel b = new JPanel();
+            JButton add = new JButton("Add"), update = new JButton("Update"), del = new JButton("Delete"),
+                    clear = new JButton("Clear"), find = new JButton("Search"), refresh = new JButton("Show All");
+  b.add(add); b.add(update); b.add(del); b.add(clear); b.add(new JLabel("Search")); b.add(search); b.add(find); b.add(refresh);
+            add(f, BorderLayout.NORTH); add(new JScrollPane(table), BorderLayout.CENTER); add(b, BorderLayout.SOUTH);
+            add.addActionListener(e -> save(false)); update.addActionListener(e -> save(true));
+            del.addActionListener(e -> delete()); clear.addActionListener(e -> clear());
+            find.addActionListener(e->load(search.getText().trim())); refresh.addActionListener(e -> load(""));
+ table.getSelectionModel().addListSelectionListener(e -> {
+                if (!e.getValueIsAdjusting() && table.getSelectedRow() >= 0) {
+     int r = table.getSelectedRow();
+                    id.setText(data.getValueAt(r,0).toString()); name.setText(data.getValueAt(r,1).toString());
+                    category.setText(String.valueOf(data.getValueAt(r,2))); price.setText(data.getValueAt(r,3).toString());
+                    stock.setText(data.getValueAt(r,4).toString()); barcode.setText(String.valueOf(data.getValueAt(r,5)));
+                }
+            });
+            load("");
+        }
+private void load(String term) {
+            data.setRowCount(0);
+            Stringsql="SELECT product_id,product_name,category,price,stock_quantity,barcode FROM products " +
+                    "WHERE product_name LIKE ? OR barcode LIKE ? ORDER BY product_id";
+            try (Connection c = connect(); PreparedStatement p = c.prepareStatement(sql)) {
+                p.setString(1, "%" + term + "%"); p.setString(2, "%" + term + "%");
+                try (ResultSet r = p.executeQuery()) { while (r.next()) addRow(data,r,6); }
+            } catch (Exception e) { error(this,e); }
+        }
+        private void save(boolean update) {
+ try {
+                if(name.getText().trim().isEmpty())thrownew IllegalArgumentException("Enter product name.");
+                BigDecimal amount = new BigDecimal(price.getText().trim());
+                int qty = Integer.parseInt(stock.getText().trim());
+                if (amount.signum() < 0 || qty < 0) throw new IllegalArgumentException("Price 
+and stock cannot be negative.");
+                String sql = update
+                        ?"UPDATEproductsSET product_name=?,category=?,price=?,stock_quantity=?,barcode=?WHERE product_id=?"
+                        "INSERTINTO products(product_name,category,price,stock_quantity,barcode) VALUES(?,?,?,?,?)";
+                try (Connection c = connect(); PreparedStatement p = c.prepareStatement(sql)) {
+                    p.setString(1,name.getText().trim()); p.setString(2,category.getText().trim());
+                    p.setBigDecimal(3,amount);p.setInt(4,qty); p.setString(5,barcode.getText().trim());
+                    if (update) p.setInt(6,Integer.parseInt(id.getText()));
+                    p.executeUpdate();
+                }
+                clear(); load(""); JOptionPane.showMessageDialog(this,"Product saved.");
+            } catch (Exception e) { error(this,e); }
+        }
+private void delete() {
+            if (id.getText().isEmpty()) return;
+            try (Connection c = connect(); PreparedStatement p = 
+c.prepareStatement("DELETE FROM products WHERE product_id=?")) {
+                p.setInt(1,Integer.parseInt(id.getText())); p.executeUpdate(); clear(); load("");
+            } catch (Exception e) { error(this,e); }
+        }
+        private void clear() { id.setText(""); name.setText(""); category.setText(""); price.setText(""); stock.setText(""); barcode.setText(""); table.clearSelection(); }
+  }
+// ---------------- CUSTOMER LOYALTY MANAGEMENT ----------------
+    private static class CustomerPanel extends JPanel {
+        private final JTextField id = field(5), name = field(14), phone = field(12), email = field(16), points = field(6);
+        private final JComboBox<String> level = new JComboBox<>(new String[]{"REGULAR","SILVER","GOLD"});
+        private final DefaultTableModel data = model("Customer ID","Customer Name","Phone","Email","Loyalty Points","Membership");
+        private final JTable table = new JTable(data);
+
+        CustomerPanel() {
+            setLayout(newBorderLayout(8,8));id.setEditable(false); points.setEditable(false);
+            JPanel f = new JPanel(new GridLayout(3,4,8,8));
+            f.add(new JLabel("Customer ID")); f.add(id); f.add(new JLabel("Customer Name")); f.add(name);
+            f.add(new JLabel("Phone")); f.add(phone); f.add(new JLabel("Email")); f.add(email);
+            f.add(new JLabel("Loyalty Points")); f.add(points); f.add(new JLabel("Membership")); f.add(level);
+            JPanel b = new JPanel();
+JButton add = new JButton("Add"), update = new JButton("Update"), del = new JButton("Delete"),
+                    clear = new JButton("Clear"), refresh = new JButton("Refresh");
+            b.add(add); b.add(update); b.add(del); b.add(clear); b.add(refresh);
+add(f,BorderLayout.NORTH); add(new JScrollPane(table),BorderLayout.CENTER); add(b,BorderLayout.SOUTH);
+            add.addActionListener(e -> save(false)); update.addActionListener(e -> save(true));
+            del.addActionListener(e -> delete()); clear.addActionListener(e -> clear()); refresh.addActionListener(e -> load());
+            table.getSelectionModel().addListSelectionListener(e -> {
+                if (!e.getValueIsAdjusting() && table.getSelectedRow() >= 0) {
+  int r=table.getSelectedRow(); id.setText(data.getValueAt(r,0).toString());
+                    name.setText(data.getValueAt(r,1).toString()); phone.setText(String.valueOf(data.getValueAt(r,2)));
+                    email.setText(String.valueOf(data.getValueAt(r,3))); points.setText(data.getValueAt(r,4).toString());
+                    level.setSelectedItem(data.getValueAt(r,5).toString());
+                }
+            });
+            load();
+        }
+        private void load() {
+ data.setRowCount(0);
+            try(Connection c=connect(); PreparedStatement p=c.prepareStatement(
+                    "SELECT customer_id,customer_name,phone,email,loyalty_points,membership_level FROM customers ORDER BY customer_id");
+                ResultSet r=p.executeQuery()) { while(r.next()) addRow(data,r,6); }
+            catch(Exception e){error(this,e);}
+        }	
+        private void save(boolean update) {
+            if(name.getText().trim().isEmpty()){JOptionPane.showMessageDialog(this,"Enter customer name.");return;}
+            String sql=update
+                    ?"UPDATEcustomersSET customer_name=?,phone=?,email=?,membership_level=? WHERE customer_id=?"
+                    :"INSERTINTO customers(customer_name,phone,email,loyalty_points,membership_level) VALUES(?,?,?,0,'REGULAR')";
+            try(Connection c=connect();PreparedStatement p=c.prepareStatement(sql)){
+try(Connection c=connect();PreparedStatement p=c.prepareStatement(sql)){
+                p.setString(1,name.getText().trim());p.setString(2,phone.getText().trim());p.setString(3,email.getText().trim());
+if(update){p.setString(4,level.getSelectedItem().toString());p.setInt(5,Integer.parseInt(id.getText()));}
+                p.executeUpdate();clear();load();JOptionPane.showMessageDialog(this,"Customer 
+saved.");
+            }catch(Exception e){error(this,e);}
+        }
+        private void delete(){
+            if(id.getText().isEmpty())return;
+            try(Connection c=connect();PreparedStatement p=c.prepareStatement("DELETE FROM customers WHERE customer_id=?")){
+                p.setInt(1,Integer.parseInt(id.getText()));p.executeUpdate();clear();load();
+            }catch(Exception e){error(this,e);}
+        }
+        private void clear(){id.setText("");name.setText("");phone.setText("");email.setText("");points.setText("");level.setSelectedIndex(0);table.clearSelection();}
+    }
+// ---------------- BILLING & SALES MANAGEMENT ----------------
+    private static class BillingPanel extends JPanel {
+        private final JTextField productId = field(7), quantity = field(5), discount = field(5), tax = field(5);
+        private final JComboBox<String> customer = new JComboBox<>();
+        privatefinalDefaultTableModelcar=model("Product ID","Product","Quantity","Unit Price","Total");
+        private final JTable table = new JTable(cart);
+        private final JLabel subtotalLabel = new JLabel("Subtotal: 0.00");
+        private final JLabel grandLabel = new JLabel("Grand Total: 0.00");
+        private BigDecimal subtotal = BigDecimal.ZERO;
+
+        BillingPanel() {
+            setLayout(new BorderLayout(8,8));
+JPanel top = new JPanel(new GridLayout(2,4,8,8));
+            top.add(new JLabel("Customer ID (blank = walk-in)")); top.add(customer);
+  top.add(new JLabel("Product ID")); top.add(productId);
+            top.add(new JLabel("Quantity")); top.add(quantity);
+            JButton add = new JButton("Add to Cart"), remove = new JButton("Remove Selected");
+            top.add(add); top.add(remove);
+            JPanel bottom = new JPanel(new FlowLayout(FlowLayout.LEFT));
+            bottom.add(new JLabel("Discount %")); bottom.add(discount);
+            bottom.add(new JLabel("Tax %")); bottom.add(tax);
+            JButton total = new JButton("Calculate"), save = new JButton("Save Bill"), clear = new JButton("Clear");
+            bottom.add(total);bottom.add(save);bottom.add(clear); bottom.add(subtotalLabel); bottom.add(grandLabel);
+            add(top,BorderLayout.NORTH);add(new JScrollPane(table),BorderLayout.CENTER); add(bottom,BorderLayout.SOUTH);
+            add.addActionListener(e -> addItem()); remove.addActionListener(e -> removeItem());
+            total.addActionListener(e -> calculate()); save.addActionListener(e -> saveBill()); clear.addActionListener(e -> clear());
+            loadCustomers();
+        }
+        private void loadCustomers() {
+            customer.removeAllItems(); customer.addItem("");
+            try(Connection c=connect();PreparedStatement p=c.prepareStatement("SELECT customer_id,customer_name FROM customers ORDER BY customer_name");
+ ResultSet r=p.executeQuery()){
+                while(r.next()) customer.addItem(r.getInt(1)+" - "+r.getString(2));
+            }catch(Exception e){error(this,e);}
+        }
+        private void addItem() {
+            try {
+                intpid=Integer.parseInt(productId.getText().trim()), qty=Integer.parseInt(quantity.getText().trim());
+                if(qty<=0)throw new IllegalArgumentException("Quantity must be greater than 
+zero.");
+               try(Connection c=connect();PreparedStatement p=c.prepareStatement(
+                        "SELECT product_name,price,stock_quantity FROM products WHERE product_id=?")){
+                    p.setInt(1,pid);
+                    try(ResultSet r=p.executeQuery()){
+                        if(!r.next())throw new IllegalArgumentException("Product not found.");
+                        if(r.getInt("stock_quantity")<qty)thrownew IllegalArgumentException("Insufficient stock.");
+                        BigDecimalunit=r.getBigDecimal("price"), line=unit.multiply(BigDecimal.valueOf(qty));
+                        cart.addRow(new Object[]{pid,r.getString("product_name"),qty,unit,line});
+                    }
+                }
+                productId.setText("");quantity.setText("");calculate();
+            }catch(Exception e){error(this,e);}
+        }
+total.addActionListener(e -> calculate()); save.addActionListener(e -> saveBill()); clear.addActionListener(e -> clear());
+            loadCustomers();
+        }
+        private void loadCustomers() {
+            customer.removeAllItems(); customer.addItem("");
+            try(Connection c=connect();PreparedStatement p=c.prepareStatement("SELECT customer_id,customer_name FROM customers ORDER BY customer_name");
+                ResultSet r=p.executeQuery()){
+                while(r.next()) customer.addItem(r.getInt(1)+" - "+r.getString(2));
+            }catch(Exception e){error(this,e);}
+        }
+        private void addItem() {
+            try {
+                intpid=Integer.parseInt(productId.getText().trim()), qty=Integer.parseInt(quantity.getText().trim());
+    if(qty<=0)throw new IllegalArgumentException("Quantity must be greater 
+than zero.");
+                try(Connection c=connect();PreparedStatement p=c.prepareStatement(
+                        "SELECT product_name,price,stock_quantity FROM products WHERE product_id=?")){
+                    p.setInt(1,pid);
+                    try(ResultSet r=p.executeQuery()){
+                        if(!r.next())throw new IllegalArgumentException("Product not found.");
+                        if(r.getInt("stock_quantity")<qty)throw new IllegalArgumentException("Insufficient stock.");
+                        BigDecimalunit=r.getBigDecimal("price"), 
+line=unit.multiply(BigDecimal.valueOf(qty));
+                        cart.addRow(new Object[]{pid,r.getString("product_name"),qty,unit,line});
+                    }
+                }
+                productId.setText("");quantity.setText("");calculate();
+            }catch(Exception e){error(this,e);}
+        }
+privatevoidremoveItem(){int r=table.getSelectedRow();if(r>=0){cart.removeRow(r);calculate();}}
+        private BigDecimal percent(String value) {
+            if(value.trim().isEmpty())return BigDecimal.ZERO;
+            BigDecimal n=new BigDecimal(value.trim());
+            if(n.signum()<0||n.compareTo(new BigDecimal("100"))>0)thrownew IllegalArgumentException("Discount and tax must be between 0 and 100.");
+            return n;
+        }
+        private BigDecimal grandTotal() {
+            BigDecimal d=percent(discount.getText()), t=percent(tax.getText());
+            BigDecimal discountAmount=subtotal.multiply(d).divide(new BigDecimal("100"),2,java.math.RoundingMode.HALF_UP);
+            BigDecimal after=subtotal.subtract(discountAmount);
+ BigDecimal taxAmount=after.multiply(t).divide(new 
+BigDecimal("100"),2,java.math.RoundingMode.HALF_UP);
+            return after.add(taxAmount);
+        }
+        private void calculate() {
+            try{
+                subtotal=BigDecimal.ZERO;
+ for(inti=0;i<cart.getRowCount();i++)subtotal=subtotal.add(new BigDecimal(cart.getValueAt(i,4).toString()));
+                BigDecimal d=percent(discount.getText()),t=percent(tax.getText());
+                BigDecimaldiscountAmount=subtotal.multiply(d).divide(new BigDecimal("100"),2,java.math.RoundingMode.HALF_UP);
+                BigDecimal taxAmount=subtotal.subtract(discountAmount).multiply(t).divide(new BigDecimal("100"),2,java.math.RoundingMode.HALF_UP);
+                subtotalLabel.setText("Subtotal: "+subtotal);
+                grandLabel.setText("GrandTotal: "+subtotal.subtract(discountAmount).add(taxAmount));
+            }catch(Exception e){error(this,e);}
+        }
+  private void saveBill() {
+            if(cart.getRowCount()==0){JOptionPane.showMessageDialog(this,"Add products to the cart.");return;}
+            Connection c=null;
+            try{
+                calculate();
+                BigDecimal d=percent(discount.getText()),t=percent(tax.getText());
+                BigDecimal discountAmount=subtotal.multiply(d).divide(new BigDecimal("100"),2,java.math.RoundingMode.HALF_UP);
+                BigDecimal taxAmount=subtotal.subtract(discountAmount).multiply(t).divide(new BigDecimal("100"),2,java.math.RoundingMode.HALF_UP);
+                BigDecimal grand=subtotal.subtract(discountAmount).add(taxAmount);
+              
+Integer customerId=null;
+String selected=(String)customer.getSelectedItem();
+              
+if(selected!=null&&!selected.isBlank())customerId=Integer.parseInt(selected.split(" - ")[0]);
+                c=connect();c.setAutoCommit(false);
+                int billId;
+                try(PreparedStatement p=c.prepareStatement(
+                        "INSERTINTO sales_bills(customer_id,subtotal,discount,tax,grand_total) VALUES(?,?,?,?,?)",
+                        Statement.RETURN_GENERATED_KEYS)){
+                    if(customerId==null)p.setNull(1,Types.INTEGER);else p.setInt(1,customerId);
+                    p.setBigDecimal(2,subtotal);p.setBigDecimal(3,discountAmount);p.setBigDecimal(4,taxAmount);p.setBigDecimal(5,grand);
+                    p.executeUpdate();
+                    try(ResultSet keys=p.getGeneratedKeys()){keys.next();billId=keys.getInt(1);}
+                }
+try(PreparedStatement item=c.prepareStatement(
+                        "INSERT INTO sales_items(bill_id,product_id,quantity,unit_price,total_price) VALUES(?,?,?,?,?)");
+                    PreparedStatement stock=c.prepareStatement(
+                        "UPDATE products SET stock_quantity=stock_quantity-? WHERE product_id=? AND stock_quantity>=?")){
+                    for(int i=0;i<cart.getRowCount();i++){
+                        int pid=Integer.parseInt(cart.getValueAt(i,0).toString());
+                        int qty=Integer.parseInt(cart.getValueAt(i,2).toString());
+                        BigDecimal unit=new BigDecimal(cart.getValueAt(i,3).toString());
+                        BigDecimal line=new 
+
+BigDecimal(cart.getValueAt(i,4).toString());
+                        stock.setInt(1,qty);stock.setInt(2,pid);stock.setInt(3,qty);
+                        if(stock.executeUpdate()==0)throw new SQLException("Stock changed 
+or insufficient for product ID "+pid);
+                       item.setInt(1,billId);item.setInt(2,pid);item.setInt(3,qty);item.setBigDecimal(4,unit);item.setBigDecimal(5,line);item.executeUpdate();
+                    }
+                }
+public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> {
+            try {
+                initializeDatabase();
+                showLogin();
+            } catch(Exception e) {
+                JOptionPane.showMessageDialog(null,
+                        "Unable to start application.\nCheck MySQL service, Connector/J and database credentials.\n\n"+e.getMessage(),
+                        "Startup Error",JOptionPane.ERROR_MESSAGE);
+            }
+        });
+    }
